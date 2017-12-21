@@ -1,0 +1,352 @@
+---
+title: "Test"
+output: html_document
+---
+
+
+```{r}
+#Load Packages----
+library(stringr)
+library(datacheck)
+library(lubridate)
+library(tidyverse)
+library(reshape2)
+library(knitr)
+# library(VennDiagram)
+# library(Amisc)
+
+
+#Load datasets----
+dir <- "/Users/wangshanzhao/Desktop/QualityCheckCodes"
+
+disease_tmp <- read.delim(paste0(dir,"/q16-0108_disesase_details_deid_2017-10-24.txt"),
+											stringsAsFactors = FALSE)
+
+# Remove duplicated samples 79 to be explored later
+disease <- dplyr::filter(disease_tmp, !duplicated(disease_tmp$study_id))
+# surgery <- read.delim(paste0(dir, "/q16-0108_surgical_deid_2017-10-24.txt"),
+#											stringsAsFactors =FALSE)
+# cbocou.tmp <- read.delim(paste0(dir, "/access_master_deid_2017-10-24.txt"),
+#										 stringsAsFactors =FALSE)
+# walk.av <- 1
+# if(walk.av){
+#	walk <- read.csv(paste0(dir, "/walk.csv"), colClasses = "character",
+#										 stringsAsFactors =FALSE)
+#	cbocou <- merge(walk,cbocou.tmp, by="CBI_ID")
+# }else{
+# 	cbocou <- cbocou.tmp
+# }
+ 
+```
+
+
+### Funtions 
+```{r}
+SingleColumnCheck <- function(List, Vector) {
+  # Apply designed checking rules to selected dataframes and summarise the result  
+  #
+  # Args:
+  #   List : This is a list of two dataframes
+  #   Vector: This is a vector of two checking files, both checking are written in separated R files and we require the first checking file verifes the first dataframe in List, the second one verifies the second one in the List
+  #
+  # Returns: Two new dataframes, one lists which patient violates which checking rule. Another one contains all rules that have been used to check. 
+  
+  # Create two empty dataframes: df1, df2 and they are the two dataframes that will be returned by the function  
+  df1 <- data.frame(as.numeric(0), as.character(0), as.character(0), stringsAsFactors = FALSE)
+  colnames(df1) <- c("Study_id", "Variable", "Reason")
+  df2 <- data.frame(as.character(0), as.character(0), stringsAsFactors = FALSE)
+  colnames(df2) <- c("variable.list", "comments.list")
+  
+  for(k in 1: length(List)){
+    rule <- read_rules(file = Vector[k]) # read checking rules 
+    patient.data <- List[[k]]  # load one data file for checking 
+    summary.overall <- datadict_profile(patient.data, rule)  # apply rules to the data file, and obtain an overal checking feedback
+    violation.list <- summary.overall$checks$Error.sum # a list of numbers of violations on each rule, i.e., [10, 3, 15]
+    number.vio <- sum(violation.list) # the total number of violations on all rules 
+    number.rule <- length(violation.list) # number of how many rules that have been violated 
+    comments.list <- summary.overall$checks$Comment # a list of rules in the rule set
+    variable.list <- summary.overall$checks$Variable # a list of variables in the data file that rules are applied to
+    if (number.vio != 0){
+      for( i in 1 : number.rule){
+        if( violation.list[i] != 0){
+          index.list <- as.numeric(unlist(strsplit(summary.overall$checks$Error.list[i], ","))) # split a list of indices by ","
+          for(j in 1: length(index.list)){
+             index <- patient.data$study_id[index.list[j]] # `study_id` gives the unique id of the patient
+             df1 <- rbind(df1, c(index, variable.list[i], comments.list[i]))  
+          }
+        }
+      }
+    }
+    df2 <- rbind(df2, data.frame(variable.list, comments.list))
+   }
+   return(list(df1[-1, ], df2[-1, ])) # remove the 1st row, since it is set to be all '0' in the beginning 
+  } 
+# -------------------------------------------------------------------------------------------------------------------
+
+DateCompare <- function(df1, colname1, colname2, df2) {
+  # We expect the date in colname1 to be earlier than the date in colname2, which is checked by this funtion. Moreover, this function will return a dataframe(df2) of all violated patients  
+  #
+  # Args :
+  #   df1: This is the original dataframe 
+  #   colname1/2 : Two columns in df1 
+  #   df2: This is a dataframe contains all violated patient data( i.e., colname1 is later than colname2 )
+  #
+  # Return: 
+  #   df2: This is a dataframe of all violated patient data 
+  
+  colname.list <- colnames(df1) # Obtain all colnames in df1
+  index1 <- match(colname1, colname.list) # Get the index of our input colnames 
+  index2 <- match(colname2, colname.list)
+  
+  for(i in 1: nrow(df1)) {
+    # Make sure they are both non-empty
+    if(!(df1[, index1][i] %in% c("", " ", NA)) & !(df1[, index2][i] %in% c("", " ", NA))) {
+      # Compare the date
+      if(as.Date(df1[, index1][i], "%d/%m/%Y") > as.Date(df1[, index2][i], "%d/%m/%Y")) {
+        id <- df1[i, 1] # study_id is the 1st column 
+        vari <- paste(colname1, colname2, sep = "&") # name of the variable that checking rules apply to 
+        descrip <- paste("Patients have", colname2, "before", colname1) # description of the checking rule
+        df2 <- rbind(df2, c(id, vari, descrip)) 
+      } 
+    }
+  }
+  return(df2)
+}
+# -------------------------------------------------------------------------------------------------------------------
+
+CheckCoexist <- function(df1, colname1, colname2, df2, type) {
+  # Check the co-existence of colname1 and colname2 in df1. Add all that fail the checking test to df2 
+  #
+  # Args :
+  #   df1: This is the original dataframe 
+  #   colname1/2 : Two columns in df1 
+  #   df2: This is a dataframe contains all violated patient data along with which rule they violate 
+  #   type: 
+  #     Type 1: colname1 & colname2 have to be either both existing or both empty at the same time
+  #     Type 2: If colname2 exists, then colname1 must exist 
+  #
+  # Return: 
+  #   df2: This is a dataframe contains all violated patient data along with which rule they violate 
+  
+  colname.list <- colnames(df1) # Obtain the colnames of all df1
+  index1 <- match(colname1, colname.list) # Get the index of colname1 & colname2 in the colname list 
+  index2 <- match(colname2, colname.list)
+  
+  # Tyep 1 checking 
+  if(type == 1){
+    for(i in 1: nrow(df1)){
+      if((df1[, index1][i] %in% c("", " ", NA)) & !(df1[, index2][i] %in% c("", " ", NA))){
+        id <- df1[i, 1] # study_id is the 1st column 
+        vari <- paste(colname1, colname2, sep = "&")
+        descrip <- paste("Patients have", colname2, "but do NOT have", colname1)
+        df2 <- rbind(df2, c(id, vari, descrip))
+        }
+      if(!(df1[, index1][i] %in% c("", " ", NA)) & (df1[, index2][i] %in% c("", " ", NA))){
+        id <- df1[i, 1] # study_id is the 1st column 
+        vari <- paste(colname1, colname2, sep = "&")
+        descrip <- paste("Patients have", colname1, "but do NOT have", colname2)
+        df2 <- rbind(df2, c(id, vari, descrip))
+        }
+      }  
+  }
+  # Type 2 checking 
+  else{
+    for(i in 1: nrow(df1)){
+      if((df1[, index1][i] %in% c("", " ", NA)) & !(df1[, index2][i] %in% c("", " ", NA))){
+        id <- df1[i, 1] # study_id is the 1st column 
+        vari <- paste(colname1, colname2, sep = "&")
+        descrip <- paste("Patients have", colname2, "but do NOT have", colname1)
+        df2 <- rbind(df2, c(id, vari, descrip))
+      }
+    }
+  }
+  return(df2)
+}
+# -------------------------------------------------------------------------------------------------------------------
+
+RuleAdd <- function(colname1, colname2, df2, type) {
+  # Add checking rules to df2(a rule holder) regardless of it has been violated or not. Each checking rule added to df2 are rules that being used in the previous functions : `DateCompare` and `CheckCoexist`
+  #
+  # Args :
+  #   colname1/2 : Two columns in df1 
+  #   df2: This is a dataframe holds all checking rules even if they are NOT violated 
+  #   type:
+  #     1: Add rules that are used in DateCompare()
+  #     2: Add rules that are used in CheckCoexist()
+  #   
+  # Return:
+  #   df2: This is a dataframe holds all checking rules 
+  
+  if(type == 1){
+    vari <- paste(colname1, colname2, sep = "&") # name of the variable that checking rules apply to 
+    descrip <- paste("Patients have", colname2, "before", colname1) # description of the checking rule
+    df2 <- rbind(df2, c(vari, descrip)) 
+  }
+  else{
+    vari <- paste(colname1, colname2, sep = "&") # name of the variable that checking rules apply to 
+    descrip1 <- paste("Patients have", colname2, "but do NOT have", colname1) # description of the checking rule
+    descrip2 <- paste("Patients have", colname1, "but do NOT have", colname2)
+    df2 <- rbind(df2, c(vari, descrip1)) 
+    df2 <- rbind(df2, c(vari, descrip2))
+  }
+}
+```
+
+
+### Data Preparation
+```{r}
+# Load and rename `disease` for quality check 
+all.patients <- disease
+
+# There are several columns involves `date + time`. We filter them into `date` only for a better checking operation
+all.patients <- all.patients %>%
+  separate(diagnosis_date, into = "diagnosis_date", sep = " ") %>% 
+	separate(site_admit_date, into = "site_admit_date", sep = " ") %>% 
+	separate(fst_treat_date, into = "fst_treat_date", sep = " ") %>% 
+	separate(death_date, into="death_date",sep=" ") %>% 
+	separate(last_contact_date, into="last_contact_date", sep=" ") %>% 
+	separate(last_attended_appt, into="last_attended_appt", sep=" ") 
+
+# Similarly, in order to have a better checking operation we split `all.patients` into `alive` and `dead` 
+alive.patents <- all.patients[all.patients$pat_status == "A", ] # All alive patients  
+dead.patients <- all.patients[all.patients$pat_status == "D", ] # All dead patients 
+```
+
+
+### Data Quality Cehck
+```{r}
+# Missing Check 
+patients.sets.missing <- list(all.patients,  dead.patients) # Load data files
+missing.rules.sets <- c("missing_check.R", "missing_check_dead.R") # Load checking files 
+
+# Error Check
+patients.sets.error <- list(alive.patents, dead.patients) # Load data files
+error.rules.sets <- c("Check_rule_alive.R", "Check_rule_dead.R") # Load checking files
+
+# MissingResult <- SingleColumnCheck(patients.sets.missing, missing.rules.sets)
+
+ErrorResult <- SingleColumnCheck(patients.sets.error, error.rules.sets) # Error check 
+problem.index <- ErrorResult[[1]] # df of problematic data 
+rule.list <- ErrorResult[[2]] # df of all checking rules 
+
+# matrix(NA, nrow = 3, ncol = 2, dimnames = list(c("A", "B", "C"), c("D", "E"))) %>% as.data.frame()
+
+
+
+# Apply `DateCompare` to problem.index 
+
+problem.index <- problem.index %>% DateCompare(all.patients, "last_attended_appt", "death_date",. )%>% 
+DateCompare(all.patients, "last_contact_date", "death_date",.) %>%
+DateCompare(all.patients, "diagnosis_date", "death_date",.) %>%
+DateCompare(all.patients, "site_admit_date", "death_date",.) %>%
+DateCompare(all.patients, "diagnosis_date", "site_admit_date",.) %>%
+DateCompare(all.patients, "site_admit_date", "last_contact_date",.) %>%
+DateCompare(all.patients, "site_admit_date", "last_attended_appt",.) %>%
+DateCompare(all.patients, "diagnosis_date", "last_contact_date",.) %>%
+DateCompare(all.patients, "diagnosis_date", "last_attended_appt",.)
+
+# Update `rule.list` 
+
+rule.list <- rule.list %>% RuleAdd("last_attended_appt", "death_date",. , type = 1) %>% 
+RuleAdd("last_contact_date", "death_date",., type = 1) %>%
+RuleAdd("diagnosis_date", "death_date",., type = 1) %>%
+RuleAdd("site_admit_date", "death_date",., type = 1) %>%
+RuleAdd("diagnosis_date", "site_admit_date",., type = 1) %>%
+RuleAdd("site_admit_date", "last_contact_date",., type = 1) %>%
+RuleAdd("site_admit_date", "last_attended_appt",., type = 1) %>%
+RuleAdd("diagnosis_date", "last_contact_date",., type = 1) %>%
+RuleAdd("diagnosis_date", "last_attended_appt",., type = 1)
+
+
+# Apply `CheckCoexist` to problem.index 
+
+problem.index <- problem.index %>% 
+CheckCoexist(all.patients, "last_contact_type", "last_contact_date", ., 1) %>%
+CheckCoexist(all.patients, "last_contact_type", "last_contact_type_desc", ., 1) %>%
+CheckCoexist(all.patients, "death_cause_original", "death_cause_orig_desc", ., 1) %>%
+CheckCoexist(all.patients, "death_sec_cause", "death_sec_cause_desc", ., 1) %>%
+CheckCoexist(all.patients, "death_cause_orig_desc", "death_sec_cause_desc", ., 2)
+
+# Update `rule.list` 
+
+rule.list <- rule.list %>% RuleAdd("last_contact_type", "last_contact_date",. , type = 2) %>% 
+RuleAdd("last_contact_type", "last_contact_type_desc",. , type = 2) %>%
+RuleAdd("death_cause_original", "death_cause_orig_desc",., type = 2) %>%
+RuleAdd("death_sec_cause", "death_sec_cause_desc",., type = 2) %>%
+RuleAdd("death_cause_orig_desc", "death_sec_cause_desc",., type = 2)
+
+```
+
+
+## Edit Rule file
+```{r}
+Rule.file <- rule.list
+# Assign actionable to each rule after discussion with Aline   
+Rule.file$Actionable <- rep(TRUE, nrow(Rule.file)) # All mistakes are considered to be `Actionable`
+
+for(i in 1: nrow(Rule.file)){
+  if (i %in% c(6, 9, 12, 15, 22, 28, 31, 34, 41)){
+    Rule.file$Level[i] <- "Moderate"
+  }
+  else if(i %in% c(18, 19, 20, 21)){
+    Rule.file$Level[i] <- "Mild"
+  }
+  else{
+    Rule.file$Level[i] <- "Severe"
+  }
+}
+
+write.csv(Rule.file, "RuleList.csv")
+```
+
+
+### Prepare for data presentation  
+```{r}
+final.result <- dcast(problem.index, Study_id ~ Reason, value.var = "Reason") 
+result.present <- final.result # Use a new dataframe to represent the result 
+column.name <- colnames(result.present) # 
+rule.mathcing.vector <- unique(Rule.file$comments.list) # A list of all checking rules 
+
+# Add four columns 
+result.present$Violated.rules <- rep("", nrow(result.present)) # List which rule/rules does a patient violate
+result.present$Level <- rep("", nrow(result.present)) # Indicate the severity 
+result.present$Actionable <- rep("", nrow(result.present)) # Indicate whether this violation can be fixed or not 
+result.present$Variable <- rep("", nrow(result.present)) # Indicate the sepcific variable that violates the rule 
+
+
+for (i in 2: length(column.name)){
+  # Since the first column is `Study_id`, we start from 2  
+  matching.index <- as.numeric(match(column.name[i], rule.mathcing.vector)) 
+  for (j in 1: nrow(result.present)){
+    if (result.present[, i][j] %in% c(NA)){
+      # in c(NA) means the patient does not violate the rule 
+      result.present$Violated.rules[j] <- paste0(result.present$Violated.rules[j], NULL) # Paste NULL to ""
+      result.present$Variable[j] <- paste0(result.present$Variable[j], NULL)
+    }
+    else{
+      # Assign the severe levels 
+      if (result.present$Level[j] == "" | result.present$Level[j] != "Severe"){
+        result.present$Level[j] <- Rule.file$Level[matching.index]
+      }
+      if (result.present$Actionable[j] == "" | result.present$Actionable[j] != FALSE ){
+        result.present$Actionable[j] <- Rule.file$Actionable[matching.index]
+       }
+      if (result.present$Variable[j] %in% c("", NA) ){
+        result.present$Violated.rules[j] <- paste0(result.present$Violated.rules[j], matching.index) 
+        result.present$Variable[j] <- paste0(result.present$Variable[j], Rule.file$variable.list[matching.index])
+      }
+      else{
+        result.present$Violated.rules[j] <- paste(result.present$Violated.rules[j], matching.index, sep = ", ") 
+        result.present$Variable[j] <- paste(result.present$Variable[j], Rule.file$variable.list[matching.index], sep = ", ")       
+      }
+     }
+    }
+   }
+
+result.present <- result.present[, -(2: ncol(final.result))] # Since 2: ncol(final.result) is redudant for presentation 
+
+write.csv(result.present,   "presentation.csv") 
+
+```
+
+

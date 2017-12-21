@@ -1,0 +1,99 @@
+---
+title: "Checking Result Summary"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+Page 1
+========================================================================
+
+```{r setup, include=TRUE}
+library(flexdashboard)
+library(knitr)
+library(DT)
+library(ggplot2)
+```
+
+Row {data-height=600}
+-----------------------------------------------------------------------
+
+### Table Summary
+
+```{r include=TRUE}
+#Rule <- read.csv("Rule List.csv") 
+
+Result <- read.csv("presentation.csv")
+Result <- Result[, -1] # 1st column is redudant 
+
+rr <- DT::datatable(Result, options = list(
+ columnDefs = list(list(className = 'dt-center', targets = 0:4))))
+
+formatStyle(rr, 'Level', target = 'row', backgroundColor = styleEqual(c("Severe", "Moderate", "Mild"), c('yellow',  'lightblue', 'gray')))
+```
+
+Row {data-height=680}
+-----------------------------------------------------------------------
+
+### Problematic data summary
+
+```{r}
+ggplot(data = Result) + geom_bar(mapping = aes(x = Actionable, fill = Level), position = "dodge") +
+  scale_fill_manual("", values = c("Severe" = "yellow", "Mild" = "gray", "Moderate" = "lightblue"))
+```
+
+### Overall picture on _Level_ 
+
+```{r}
+total <- 12675 # nrow(all.patients)
+
+s <- sum(Result$Level == "Severe")
+mod <- sum(Result$Level == "Moderate")
+mil <- sum(Result$Level == "Mild")
+ok1 <- total - sum(s, mod, mil)
+
+slices <- c(ok1, s, mod, mil)
+slices_labels <- round(slices/sum(slices) * 100, 3)
+slices_labels <- paste(slices_labels, "%", sep="")
+
+lbls <- c("Non-problematic", "Severe", "Moderate", "Mild")
+pie(slices, slices_labels, col = c("white", "yellow", "lightblue", "gray"))
+legend(.5, 1.0, lbls, cex = 0.95, fill = c("white", "yellow", "lightblue", "gray"))
+
+
+```
+
+### Overal picture on _Actionable_
+```{r}
+total <- 12675 # nrow(all.patients)
+
+a <- sum(Result$Actionable == TRUE)
+f <- sum(Result$Actionable == FALSE)
+ok2 <- total - sum(a, f)
+
+slices <- c(ok2, a, f)
+slices_labels <- round(slices/sum(slices) * 100, 3)
+slices_labels <- paste(slices_labels, "%", sep="")
+
+lbls <- c("Non-problematic", "Actionable", "Not Actionable")
+pie(slices, slices_labels, col = c("white", "lightgreen", "pink"))
+legend(.5, 1.0, lbls, cex = 0.95, fill = c("white", "lightgreen", "pink"))
+```
+
+Page 2
+====================================================================
+
+### Rule List
+```{r}
+
+#Result <- read.csv("presentation.csv")
+Rule <- read.csv("RuleList.csv")
+Rule <- Rule[, -1]
+
+DT::datatable(Rule, options = list(
+ columnDefs = list(list(className = 'dt-center', targets = 0:4))))
+
+```
+
+
